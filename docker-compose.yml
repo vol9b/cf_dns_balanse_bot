@@ -1,17 +1,26 @@
-version: "3.8"
 services:
   cf-dns-bot:
-    build: .
+    build: 
+      context: .
+      dockerfile: Dockerfile
     container_name: cf-dns-bot
     env_file:
       - .env
     environment:
       - CF_DB_PATH=/data/cf_dns.db
+      - PYTHONUNBUFFERED=1
     volumes:
       - cf-dns-bot-data:/data
+      - cf-dns-bot-logs:/var/log/cf-dns-bot
     restart: unless-stopped
     # Для отладки можно раскомментировать:
     # command: python bot.py --once
+    # Для тестирования без DNS изменений:
+    # command: python bot.py --no-manage-dns
+
 volumes:
   cf-dns-bot-data:
+    driver: local
+  cf-dns-bot-logs:
+    driver: local
 

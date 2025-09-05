@@ -1,7 +1,9 @@
 
 #!/usr/bin/env python3
 import argparse
+import logging
 import os
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -16,8 +18,7 @@ from dotenv import load_dotenv
 
 @dataclass
 class Config:
-    zone_ids: List[str]
-    hostnames: List[str]
+    zone_hostname_pairs: List[Tuple[str, str]]  # (zone_id, hostname)
     record_types: Set[str]
     proxied_default: bool
     ping_interval_seconds: int
@@ -30,46 +31,97 @@ class Config:
     tg_token: Optional[str]
     tg_chat_id: Optional[str]
     tg_enabled: bool
+    log_level: str = "INFO"
 
 
 CF_API_BASE = "https://api.cloudflare.com/client/v4"
 
+# Глобальная переменная для graceful shutdown
+shutdown_requested = False
 
-def ts() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def setup_logging(log_level: str = "INFO") -> None:
+    """Настройка структурированного логирования"""
+    level = getattr(logging, log_level.upper(), logging.INFO)
+    
+    # Формат логов с дополнительной информацией
+    formatter = logging.Formatter(
+        fmt='%(asctime)s | %(levelname)-5s | %(funcName)-20s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Настройка root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    
+    # Удаляем существующие handlers
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+    
+    # Отключаем логирование requests для уменьшения шума
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
+def signal_handler(signum, frame):
+    """Обработчик сигналов для graceful shutdown"""
+    global shutdown_requested
+    logging.info(f"Получен сигнал {signum}, инициируем graceful shutdown...")
+    shutdown_requested = True
+
+
+def register_signal_handlers():
+    """Регистрация обработчиков сигналов"""
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+
+
+
+# Обратная совместимость с существующими функциями логирования
 def info(msg: str) -> None:
-    print(f"[{ts()}] INFO  {msg}")
+    logging.info(msg)
 
 
 def warn(msg: str) -> None:
-    print(f"[{ts()}] WARN  {msg}")
+    logging.warning(msg)
 
 
 def err(msg: str) -> None:
-    print(f"[{ts()}] ERROR {msg}", file=sys.stderr)
+    logging.error(msg)
 
 
 def load_config_from_env() -> Config:
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
     load_dotenv(dotenv_path=env_path, override=True)
 
-    # Поддержка нескольких зон через запятую
     import re
-    zone_id_raw = os.getenv("CF_ZONE_ID") or os.getenv("CLOUDFLARE_ZONE_ID") or ""
-    zone_ids = [z.strip() for z in re.split(r"[\s,;]+", zone_id_raw) if z.strip()]
-
-    # Источник доменов: CF_HOSTNAMES (основной) или CF_HOSTNAME (наследие).
-    raw = os.getenv("CF_HOSTNAME") or ""
-    hostnames = [h.strip() for h in re.split(r"[\s,;]+", raw) if h.strip()]
+    
+    # Формат: CF_ZONE_HOSTNAME=zone1:domain1,zone2:domain2
+    zone_hostname_raw = os.getenv("CF_ZONE_HOSTNAME") or ""
+    if not zone_hostname_raw:
+        raise ValueError("CF_ZONE_HOSTNAME обязателен. Формат: zone_id:hostname,zone_id:hostname")
+    
+    zone_hostname_pairs = []
+    for pair in re.split(r"[\s,;]+", zone_hostname_raw):
+        if ":" in pair:
+            zone_id, hostname = pair.split(":", 1)
+            zone_hostname_pairs.append((zone_id.strip(), hostname.strip()))
+    
+    if not zone_hostname_pairs:
+        raise ValueError("CF_ZONE_HOSTNAME должен содержать хотя бы одну пару zone_id:hostname")
 
     record_types_env = os.getenv("CF_RECORD_TYPES", os.getenv("CF_RECORD_TYPE", "A")).upper()
     record_types = {t.strip() for t in record_types_env.split(",") if t.strip()} & {"A", "AAAA"}
     if not record_types:
         record_types = {"A"}
 
-    proxied_env = os.getenv("CF_PROXIED", "true").strip().lower()
+    proxied_env = os.getenv("CF_PROXIED", "false").strip().lower()
     proxied_default = proxied_env in {"1", "true", "yes", "on"}
 
     ping_interval_seconds = int(os.getenv("PING_INTERVAL_SECONDS", "10"))
@@ -84,14 +136,11 @@ def load_config_from_env() -> Config:
     tg_token = os.getenv("TELEGRAM_BOT_TOKEN")
     tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
     tg_enabled = (os.getenv("TELEGRAM_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}) and bool(tg_token and tg_chat_id)
-
-    if not zone_ids or not hostnames:
-        err("CF_ZONE_ID и CF_HOSTNAME обязательны. Проверь .env")
-        sys.exit(2)
+    
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
     return Config(
-        zone_ids=zone_ids,
-        hostnames=hostnames,
+        zone_hostname_pairs=zone_hostname_pairs,
         record_types=record_types,
         proxied_default=proxied_default,
         ping_interval_seconds=ping_interval_seconds,
@@ -104,6 +153,7 @@ def load_config_from_env() -> Config:
         tg_token=tg_token,
         tg_chat_id=tg_chat_id,
         tg_enabled=tg_enabled,
+        log_level=log_level,
     )
 
 
@@ -130,64 +180,130 @@ def tg_send(cfg: Config, text: str) -> None:
 # -------------------- DB --------------------
 
 def db_connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Подключение к базе данных с обработкой ошибок"""
+    try:
+        # Создаем директорию для БД если не существует
+        db_dir = os.path.dirname(os.path.abspath(db_path))
+        if db_dir and not os.path.exists(db_dir):
+            os.makedirs(db_dir, exist_ok=True)
+            logging.info(f"Создана директория для БД: {db_dir}")
+        
+        conn = sqlite3.connect(db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        
+        # Настройки для производительности и надежности
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=10000")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        
+        logging.info(f"Подключение к БД установлено: {db_path}")
+        return conn
+        
+    except sqlite3.Error as e:
+        logging.error(f"Ошибка подключения к БД {db_path}: {e}")
+        raise
+    except Exception as e:
+        logging.error(f"Неожиданная ошибка при подключении к БД: {e}")
+        raise
 
 
 def db_init(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS dns_records (
-            id TEXT PRIMARY KEY,
-            zone_id TEXT NOT NULL,
-            name TEXT NOT NULL,
-            type TEXT NOT NULL,
-            content TEXT NOT NULL,
-            ttl INTEGER NOT NULL,
-            proxied INTEGER NOT NULL,
-            status TEXT NOT NULL,
-            last_checked_at INTEGER,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
-        );
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_dns_records_name_type ON dns_records(name, type);
-        """
-    )
-    # Aggregated unique host state per (zone_id, name, type, content)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS host_states (
-            zone_id TEXT NOT NULL,
-            name TEXT NOT NULL,
-            type TEXT NOT NULL,
-            content TEXT NOT NULL,
-            last_status TEXT NOT NULL,
-            last_checked_at INTEGER,
-            last_changed_at INTEGER,
-            -- anti-flap fields
-            consec_up INTEGER NOT NULL DEFAULT 0,
-            consec_down INTEGER NOT NULL DEFAULT 0,
-            stable_status TEXT NOT NULL DEFAULT 'unknown',
-            stable_changed_at INTEGER,
-            PRIMARY KEY (zone_id, name, type, content)
-        );
-        """
-    )
-    # Migrations for older schema of host_states (if created before)
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(host_states)").fetchall()]
-    def ensure_col(name: str, ddl: str) -> None:
-        if name not in cols:
-            conn.execute(f"ALTER TABLE host_states ADD COLUMN {ddl}")
-    ensure_col("consec_up", "consec_up INTEGER NOT NULL DEFAULT 0")
-    ensure_col("consec_down", "consec_down INTEGER NOT NULL DEFAULT 0")
-    ensure_col("stable_status", "stable_status TEXT NOT NULL DEFAULT 'unknown'")
-    ensure_col("stable_changed_at", "stable_changed_at INTEGER")
-    conn.commit()
+    """Инициализация схемы базы данных с обработкой ошибок"""
+    try:
+        # Создание таблицы dns_records
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dns_records (
+                id TEXT PRIMARY KEY,
+                zone_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                ttl INTEGER NOT NULL,
+                proxied INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                last_checked_at INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            """
+        )
+        
+        # Создание индексов для производительности
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dns_records_name_type ON dns_records(name, type);
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dns_records_zone_id ON dns_records(zone_id);
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dns_records_status ON dns_records(status);
+            """
+        )
+        
+        # Создание таблицы host_states
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS host_states (
+                zone_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                last_status TEXT NOT NULL,
+                last_checked_at INTEGER,
+                last_changed_at INTEGER,
+                -- anti-flap fields
+                consec_up INTEGER NOT NULL DEFAULT 0,
+                consec_down INTEGER NOT NULL DEFAULT 0,
+                stable_status TEXT NOT NULL DEFAULT 'unknown',
+                stable_changed_at INTEGER,
+                PRIMARY KEY (zone_id, name, type, content)
+            );
+            """
+        )
+        
+        # Создание индексов для host_states
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_host_states_name ON host_states(name);
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_host_states_stable_status ON host_states(stable_status);
+            """
+        )
+        
+        # Миграции для совместимости со старыми схемами
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(host_states)").fetchall()]
+        
+        def ensure_col(name: str, ddl: str) -> None:
+            if name not in cols:
+                logging.info(f"Добавляем колонку {name} в таблицу host_states")
+                conn.execute(f"ALTER TABLE host_states ADD COLUMN {ddl}")
+        
+        ensure_col("consec_up", "consec_up INTEGER NOT NULL DEFAULT 0")
+        ensure_col("consec_down", "consec_down INTEGER NOT NULL DEFAULT 0")
+        ensure_col("stable_status", "stable_status TEXT NOT NULL DEFAULT 'unknown'")
+        ensure_col("stable_changed_at", "stable_changed_at INTEGER")
+        
+        conn.commit()
+        logging.info("Схема базы данных инициализирована успешно")
+        
+    except sqlite3.Error as e:
+        logging.error(f"Ошибка инициализации БД: {e}")
+        conn.rollback()
+        raise
+    except Exception as e:
+        logging.error(f"Неожиданная ошибка при инициализации БД: {e}")
+        conn.rollback()
+        raise
 
 
 def db_upsert_record(conn: sqlite3.Connection, rec: dict, status: str = "unknown", ts_val: Optional[int] = None) -> None:
@@ -247,10 +363,22 @@ def db_upsert_host_state(conn: sqlite3.Connection, zone_id: str, name: str, type
     consec_down = int(row["consec_down"]) if row else 0
     stable_status = row["stable_status"] if row else "unknown"
     if row is None:
-        # При первом появлении не фиксируем stable_status сразу, считаем серии
+        # При первом появлении инициализируем с учетом текущего статуса
+        if status == 'up':
+            # Для доступных серверов сразу устанавливаем стабильный статус 'up'
+            # если это первый пинг и сервер доступен
+            initial_stable = 'up'
+            initial_consec_up = up_threshold
+            initial_consec_down = 0
+        else:
+            # Для недоступных серверов начинаем с 'unknown'
+            initial_stable = 'unknown'
+            initial_consec_up = 0
+            initial_consec_down = 1
+            
         conn.execute(
             "INSERT INTO host_states(zone_id, name, type, content, last_status, last_checked_at, last_changed_at, consec_up, consec_down, stable_status, stable_changed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (zone_id, name, type_, content, status, now, now, 1 if status == 'up' else 0, 1 if status == 'down' else 0, 'unknown', None),
+            (zone_id, name, type_, content, status, now, now, initial_consec_up, initial_consec_down, initial_stable, None),
         )
     else:
         changed = (prev != status)
@@ -275,7 +403,7 @@ def db_upsert_host_state(conn: sqlite3.Connection, zone_id: str, name: str, type
         )
         stable_status = new_stable
     conn.commit()
-    return prev or "unknown", status, row["stable_status"] if row else 'unknown', stable_status
+    return prev or "unknown", status, row["stable_status"] if row else initial_stable, stable_status
 
 
 def row_changed_at(conn: sqlite3.Connection, zone_id: str, name: str, type_: str, content: str) -> int:
@@ -306,6 +434,7 @@ def cf_list_records(zone_id: str, name: str, type_: Optional[str], api_token: st
     params = {"name": name}
     if type_:
         params["type"] = type_
+    info(f"🌐 CF API запрос: GET {url} params={params}")
     all_results: List[dict] = []
     page = 1
     while True:
@@ -316,6 +445,10 @@ def cf_list_records(zone_id: str, name: str, type_: Optional[str], api_token: st
         if not data.get("success"):
             raise RuntimeError(f"Cloudflare API error: {data}")
         results = data.get("result", [])
+        info(f"🌐 CF API ответ: страница {page}, найдено {len(results)} записей")
+        if results:
+            for r in results[:3]:  # Показываем первые 3 записи для отладки
+                info(f"🌐 CF запись: {r.get('name')} ({r.get('type')}) -> {r.get('content')}")
         if not results:
             break
         all_results.extend(results)
@@ -374,13 +507,18 @@ def ping_once(address: str, timeout_seconds: int = 2) -> bool:
 
 def sync_from_cloudflare_to_db(cfg: Config, api_token: str, conn: sqlite3.Connection) -> None:
     total_records = 0
-    for zone_id in cfg.zone_ids:
-        for hostname in cfg.hostnames:
-            for rtype in cfg.record_types:
+    
+    for zone_id, hostname in cfg.zone_hostname_pairs:
+        info(f"🔍 Синхронизация {hostname} в зоне {zone_id}")
+        for rtype in cfg.record_types:
+            try:
                 records = cf_list_records(zone_id, hostname, rtype, api_token)
                 if not records:
+                    info(f"❌ Нет записей для {hostname} ({rtype}) в зоне {zone_id}")
                     continue
+                info(f"✅ Найдено {len(records)} записей для {hostname} ({rtype})")
                 for r in records:
+                    info(f"📝 Запись: {r['name']} -> {r.get('content')} (ID: {r['id']})")
                     rec = {
                         "id": r["id"],
                         "zone_id": zone_id,
@@ -392,6 +530,12 @@ def sync_from_cloudflare_to_db(cfg: Config, api_token: str, conn: sqlite3.Connec
                     }
                     db_upsert_record(conn, rec, status="unknown")
                     total_records += 1
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 403:
+                    info(f"⚠️ Нет доступа к зоне {zone_id} для домена {hostname} - пропускаем")
+                    continue
+                else:
+                    raise
     info(f"Синхронизация завершена: {total_records} записей обновлено")
 
 
@@ -434,8 +578,13 @@ def evaluate_and_update_status(conn: sqlite3.Connection, cfg: Config, hostname: 
             up_threshold=cfg.flap_up_threshold,
             down_threshold=cfg.flap_down_threshold,
         )
-        if stable_new != stable_prev and stable_new != 'unknown' and content not in notified_contents:
-            on_change(hostname, content, stable_prev if stable_prev != 'unknown' else ('up' if agg_prev == 'up' else 'down'), stable_new, sample_row)
+        # Уведомляем только при реальном изменении стабильного статуса
+        # Исключаем случаи инициализации и переходов unknown -> unknown
+        if (stable_new != stable_prev and 
+            stable_new != 'unknown' and 
+            stable_prev != 'unknown' and 
+            content not in notified_contents):
+            on_change(hostname, content, stable_prev, stable_new, sample_row)
             notified_contents.add(content)
         (up_set if is_up else down_set).add(content)
         processed_contents.add(content)
@@ -453,7 +602,14 @@ def list_host_states(conn: sqlite3.Connection, cfg: Config, hostname: str, zone_
 
 
 def reconcile_dns(conn: sqlite3.Connection, cfg: Config, api_token: str, hostname: str, up_ips: List[str], by_content: Dict[str, sqlite3.Row], zone_id: str) -> None:
-    existing = cf_list_records(zone_id, hostname, None, api_token)
+    try:
+        existing = cf_list_records(zone_id, hostname, None, api_token)
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 403:
+            info(f"⚠️ Нет доступа к зоне {zone_id} для домена {hostname} в reconcile_dns - пропускаем")
+            return
+        else:
+            raise
     existing_ip_to_record: Dict[str, dict] = {rec["content"]: rec for rec in existing if rec["type"] in cfg.record_types}
 
     # Используем стабильный статус из host_states: добавляем только IP со stable_status='up'
@@ -515,27 +671,42 @@ def reconcile_dns(conn: sqlite3.Connection, cfg: Config, api_token: str, hostnam
 
 
 def build_status_summary(conn: sqlite3.Connection, cfg: Config) -> str:
-    lines: List[str] = ["📊 Статус DNS"]
-    for zone_id in cfg.zone_ids:
-        lines.append(f"🌐 Зона: {zone_id}")
-        for hostname in cfg.hostnames:
-            rows = db_get_records_by_name_types(conn, hostname, cfg.record_types)
-            if not rows:
-                lines.append(f"• <b>{hostname}</b>: записей нет")
-                continue
-            lines.append(f"• <b>{hostname}</b>:")
-            # Берём статусы из host_states, если доступны, иначе из dns_records
-            states = conn.execute(
-                "SELECT content, COALESCE(stable_status, last_status) AS s FROM host_states WHERE zone_id=? AND name=? AND type IN (" + ",".join(["?"] * len(cfg.record_types)) + ")",
-                (zone_id, hostname, *list(cfg.record_types)),
-            ).fetchall()
+    lines: List[str] = ["📊 <b>Статус DNS</b>", ""]
+    
+    current_zone = None
+    for zone_id, hostname in cfg.zone_hostname_pairs:
+        if current_zone != zone_id:
+            if current_zone is not None:  # Добавляем разделитель между зонами
+                lines.append("")
+            lines.append(f"🌐 <b>Зона:</b> <code>{zone_id}</code>")
+            current_zone = zone_id
+        
+        # Сначала ищем в host_states (более актуальные данные)
+        states = conn.execute(
+            "SELECT content, COALESCE(stable_status, last_status) AS s FROM host_states WHERE zone_id=? AND name=? AND type IN (" + ",".join(["?"] * len(cfg.record_types)) + ")",
+            (zone_id, hostname, *list(cfg.record_types)),
+        ).fetchall()
+        
         if states:
-            items = sorted({(r["content"], r["s"]) for r in states})
+            lines.append(f"  📍 <b>{hostname}</b>")
+            # Сортируем по IP адресу
+            items = sorted([(r["content"], r["s"]) for r in states])
+            for ip, status in items:
+                dot = "🟢" if status == "up" else "🔴"
+                lines.append(f"    {dot} <code>{ip}</code>")
         else:
-            items = sorted({(r["content"], r["status"]) for r in rows})
-        for ip, s in items:
-            dot = "🟢" if s == "up" else "🔴"
-            lines.append(f"  {dot} <code>{ip}</code>")
+            # Fallback: ищем в dns_records если нет в host_states
+            rows = db_get_records_by_name_types(conn, hostname, cfg.record_types)
+            if rows:
+                lines.append(f"  📍 <b>{hostname}</b>")
+                # Сортируем по IP адресу и убираем дубликаты
+                items = sorted(set([(row["content"], row["status"]) for row in rows]))
+                for ip, status in items:
+                    dot = "🟢" if status == "up" else "🔴"
+                    lines.append(f"    {dot} <code>{ip}</code>")
+            else:
+                lines.append(f"  📍 <b>{hostname}</b>: <i>записей нет</i>")
+    
     return "\n".join(lines)
 
 
@@ -549,66 +720,119 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    args = parse_args()
-    cfg = load_config_from_env()
+    """Главная функция с улучшенной обработкой ошибок и graceful shutdown"""
+    global shutdown_requested
+    
+    try:
+        # Парсинг аргументов и загрузка конфигурации
+        args = parse_args()
+        cfg = load_config_from_env()
+        
+        # Настройка логирования
+        setup_logging(cfg.log_level)
+        logging.info("Запуск Cloudflare DNS Load Balancer Bot")
+        
+        # Регистрация обработчиков сигналов
+        register_signal_handlers()
+        
+        if args.no_manage_dns:
+            cfg.manage_dns = False
+            logging.info("Режим только мониторинга (DNS изменения отключены)")
 
-    if args.no_manage_dns:
-        cfg.manage_dns = False
+        # Проверка API токена
+        api_token = os.getenv("CLOUDFLARE_API_TOKEN") or os.getenv("CF_API_TOKEN")
+        if not api_token:
+            logging.error("Переменная CLOUDFLARE_API_TOKEN (или CF_API_TOKEN) не установлена")
+            sys.exit(2)
 
-    api_token = os.getenv("CLOUDFLARE_API_TOKEN") or os.getenv("CF_API_TOKEN")
-    if not api_token:
-        err("Переменная CLOUDFLARE_API_TOKEN (или CF_API_TOKEN) не установлена")
-        sys.exit(2)
+        # Подключение к базе данных
+        conn = db_connect(cfg.db_path)
+        db_init(conn)
 
-    conn = db_connect(cfg.db_path)
-    db_init(conn)
+        # Статистика запуска
+        unique_zones = len(set(pair[0] for pair in cfg.zone_hostname_pairs))
+        logging.info(f"Запуск: {unique_zones} зон, {len(cfg.zone_hostname_pairs)} доменов, синхронизация каждые {cfg.sync_interval_minutes}мин")
 
-    info(f"Запуск: {len(cfg.zone_ids)} зон, {len(cfg.hostnames)} доменов, синхронизация каждые {cfg.sync_interval_minutes}мин")
+        # Первоначальная синхронизация
+        sync_from_cloudflare_to_db(cfg, api_token, conn)
 
-    sync_from_cloudflare_to_db(cfg, api_token, conn)
+        # Обработчики изменений статуса
+        def on_status_change(hostname: str, ip: str, prev: str, new: str, row: sqlite3.Row) -> None:
+            if new == "up":
+                text = f"🟢 <b>{hostname}</b> <code>{ip}</code> доступен"
+            else:
+                text = f"🔴 <b>{hostname}</b> <code>{ip}</code> недоступен"
+            tg_send(cfg, text)
+            logging.info(f"TG: {text}")
 
-    def on_status_change(hostname: str, ip: str, prev: str, new: str, row: sqlite3.Row) -> None:
-        if new == "up":
-            text = f"🟢 <b>{hostname}</b> <code>{ip}</code> доступен"
-        else:
-            text = f"🔴 <b>{hostname}</b> <code>{ip}</code> недоступен"
-        tg_send(cfg, text)
-        info(f"TG: {text}")
+        def silent_on_status_change(hostname: str, ip: str, prev: str, new: str, row: sqlite3.Row) -> None:
+            # Не отправляем уведомления во время первого цикла
+            pass
 
-    def one_cycle():
-        for zone_id in cfg.zone_ids:
-            for hostname in cfg.hostnames:
-                up_ips, down_ips, by_content = evaluate_and_update_status(conn, cfg, hostname, cfg.record_types, on_status_change)
-                if cfg.manage_dns:
-                    reconcile_dns(conn, cfg, api_token, hostname, up_ips, by_content, zone_id)
+        def one_cycle(status_change_handler):
+            """Один цикл проверки всех доменов"""
+            for zone_id, hostname in cfg.zone_hostname_pairs:
+                try:
+                    up_ips, down_ips, by_content = evaluate_and_update_status(
+                        conn, cfg, hostname, cfg.record_types, status_change_handler
+                    )
+                    if cfg.manage_dns:
+                        reconcile_dns(conn, cfg, api_token, hostname, up_ips, by_content, zone_id)
+                except Exception as e:
+                    logging.error(f"Ошибка обработки домена {hostname}: {e}")
+                    continue
 
-    # Initial status summary message after first evaluation pass
-    one_cycle()
-    tg_send(cfg, build_status_summary(conn, cfg))
+        # Первый цикл без уведомлений
+        one_cycle(silent_on_status_change)
+        
+        # Отправляем сводку статуса
+        tg_send(cfg, build_status_summary(conn, cfg))
 
-    if args.once:
-        info("Завершено (разовый запуск)")
-        return
+        if args.once:
+            logging.info("Завершено (разовый запуск)")
+            return
 
-    # Счетчик циклов для периодической синхронизации
-    cycle_count = 0
-    sync_interval_cycles = (cfg.sync_interval_minutes * 60) // cfg.ping_interval_seconds
-    info(f"Синхронизация с CF каждые {cfg.sync_interval_minutes} мин")
+        # Основной цикл
+        cycle_count = 0
+        sync_interval_cycles = (cfg.sync_interval_minutes * 60) // cfg.ping_interval_seconds
+        logging.info(f"Синхронизация с CF каждые {cfg.sync_interval_minutes} мин")
 
-    while True:
-        try:
-            one_cycle()
-            cycle_count += 1
-            
-            # Периодическая синхронизация с Cloudflare
-            if cycle_count >= sync_interval_cycles:
-                info(f"Синхронизация с CF...")
-                sync_from_cloudflare_to_db(cfg, api_token, conn)
-                cycle_count = 0
+        while not shutdown_requested:
+            try:
+                one_cycle(on_status_change)
+                cycle_count += 1
                 
+                # Периодическая синхронизация с Cloudflare
+                if cycle_count >= sync_interval_cycles:
+                    logging.info("Синхронизация с CF...")
+                    sync_from_cloudflare_to_db(cfg, api_token, conn)
+                    cycle_count = 0
+                    
+            except Exception as e:
+                logging.error(f"Ошибка в основном цикле: {e}")
+                # Продолжаем работу даже при ошибках
+                
+            # Проверяем shutdown между циклами
+            for _ in range(cfg.ping_interval_seconds):
+                if shutdown_requested:
+                    break
+                time.sleep(1)
+        
+        logging.info("Graceful shutdown завершен")
+        
+    except KeyboardInterrupt:
+        logging.info("Получен сигнал прерывания")
+    except Exception as e:
+        logging.error(f"Критическая ошибка: {e}", exc_info=True)
+        sys.exit(1)
+    finally:
+        # Закрытие соединения с БД
+        try:
+            if 'conn' in locals():
+                conn.close()
+                logging.info("Соединение с БД закрыто")
         except Exception as e:
-            err(f"Ошибка цикла: {e}")
-        time.sleep(cfg.ping_interval_seconds)
+            logging.error(f"Ошибка при закрытии БД: {e}")
 
 
 if __name__ == "__main__":
