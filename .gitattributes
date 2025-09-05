@@ -1,0 +1,25 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Python files
+*.py text eol=lf
+
+# Shell scripts
+*.sh text eol=lf
+
+# Docker files
+Dockerfile text eol=lf
+docker-compose.yml text eol=lf
+
+# Configuration files
+*.env text eol=lf
+*.example text eol=lf
+
+# Documentation
+*.md text eol=lf
+*.txt text eol=lf
+
+# SQLite database (binary)
+*.db binary
+*.sqlite binary
+*.sqlite3 binary

@@ -1,0 +1,17 @@
+version: "3.8"
+services:
+  cf-dns-bot:
+    build: .
+    container_name: cf-dns-bot
+    env_file:
+      - .env
+    environment:
+      - CF_DB_PATH=/data/cf_dns.db
+    volumes:
+      - cf-dns-bot-data:/data
+    restart: unless-stopped
+    # Для отладки можно раскомментировать:
+    # command: python bot.py --once
+volumes:
+  cf-dns-bot-data:
+
