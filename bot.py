@@ -559,6 +559,7 @@ def evaluate_and_update_status(conn: sqlite3.Connection, cfg: Config, hostname: 
         else:
             is_up = ping_once(content, timeout_seconds=2)
             ping_cache[content] = is_up
+            info(f"🏓 Пинг {content}: {'✅ доступен' if is_up else '❌ недоступен'}")
         new_status = "up" if is_up else "down"
         # Обновляем все строки с этим content одинаково: один раз считаем стабильность/уведомляем
         related = [r for r in rows if r["content"] == content]
@@ -612,30 +613,38 @@ def reconcile_dns(conn: sqlite3.Connection, cfg: Config, api_token: str, hostnam
             raise
     existing_ip_to_record: Dict[str, dict] = {rec["content"]: rec for rec in existing if rec["type"] in cfg.record_types}
 
-    # Используем стабильный статус из host_states: добавляем только IP со stable_status='up'
-    states = list_host_states(conn, cfg, hostname, zone_id)
-    # Политика:
-    # - Никогда не удаляем IP со статусом 'unknown' (сохраняем текущее состояние)
-    # - Добавляем новые записи только если stable_status='up'
-    if states:
-        # Блок удаления: хотим оставить всё, что не 'down'
-        keep = {ip for ip, s in states.items() if s != 'down'}
-        # Блок добавления: можно добавлять только 'up'
-        addable = {ip for ip, s in states.items() if s == 'up'}
-        current = set(existing_ip_to_record.keys())
-        # desired = то, что должно быть в DNS после reconcile
-        # оставляем (keep ∩ current) и добавляем (addable - current)
-        desired = (keep & current) | (addable - current)
-    else:
-        # Нет данных о стабильности — сохраняем текущее состояние без изменений
-        desired = set(existing_ip_to_record.keys())
+    # ИСПРАВЛЕНИЕ: Используем актуальные результаты пинга из up_ips
+    # вместо устаревших данных из host_states
+    up_ips_set = set(up_ips)
     current = set(existing_ip_to_record.keys())
+    
+    # Получаем стабильные статусы для анти-флап логики
+    states = list_host_states(conn, cfg, hostname, zone_id)
+    
+    # Политика принятия решений на основе АКТУАЛЬНЫХ пингов:
+    # - Добавляем IP, которые сейчас доступны (up_ips) и не в DNS
+    # - Удаляем IP, которые сейчас недоступны и есть в DNS  
+    # - Учитываем анти-флап: не удаляем IP со статусом 'unknown'
+    if states:
+        # Блок добавления: добавляем доступные IP
+        to_add_candidates = up_ips_set - current
+        # Блок удаления: удаляем недоступные IP, но с учетом анти-флап
+        down_ips = current - up_ips_set
+        # Не удаляем IP со статусом 'unknown' (сохраняем при неопределенности)
+        stable_unknown = {ip for ip, s in states.items() if s == 'unknown'}
+        to_remove_candidates = down_ips - stable_unknown
+        # Желаемое состояние DNS
+        desired = (current - to_remove_candidates) | to_add_candidates
+    else:
+        # Нет данных о стабильности — используем только актуальные пинги
+        desired = up_ips_set
 
     to_add = desired - current
     to_remove = current - desired
     to_keep = desired & current
 
-    info(f"План для {hostname}: добавить={sorted(to_add)} удалить={sorted(to_remove)} оставить={sorted(to_keep)}")
+    info(f"🔍 Пинг результаты для {hostname}: доступные={sorted(up_ips)} всего_в_DNS={len(current)}")
+    info(f"📋 План для {hostname}: добавить={sorted(to_add)} удалить={sorted(to_remove)} оставить={sorted(to_keep)}")
 
     for ip in to_add:
         if ip in by_content:
