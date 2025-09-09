@@ -541,13 +541,15 @@ def sync_from_cloudflare_to_db(cfg: Config, api_token: str, conn: sqlite3.Connec
 
 def evaluate_and_update_status(conn: sqlite3.Connection, cfg: Config, hostname: str, types: Set[str], on_change) -> Tuple[List[str], List[str], Dict[str, sqlite3.Row]]:
     rows = db_get_records_by_name_types(conn, hostname, types)
+    info(f"🔍 Проверяем {hostname}: найдено {len(rows)} записей в БД для типов {types}")
     up_set: Set[str] = set()
     down_set: Set[str] = set()
     by_content: Dict[str, sqlite3.Row] = {}
     notified_contents: Set[str] = set()
     ping_cache: Dict[str, bool] = {}
     if not rows:
-        warn(f"В БД нет записей для {hostname}")
+        warn(f"❌ В БД нет записей для {hostname} (типы: {types})")
+        return [], [], {}
     processed_contents: Set[str] = set()
     for row in rows:
         content = row["content"]
@@ -780,8 +782,10 @@ def main() -> None:
 
         def one_cycle(status_change_handler):
             """Один цикл проверки всех доменов"""
+            info(f"🔄 Начинаем цикл проверки {len(cfg.zone_hostname_pairs)} доменов")
             for zone_id, hostname in cfg.zone_hostname_pairs:
                 try:
+                    info(f"🎯 Обрабатываем домен: {hostname} (зона: {zone_id})")
                     up_ips, down_ips, by_content = evaluate_and_update_status(
                         conn, cfg, hostname, cfg.record_types, status_change_handler
                     )
