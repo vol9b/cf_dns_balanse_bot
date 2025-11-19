@@ -31,7 +31,8 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
 # Копируем код приложения
-COPY --chown=app:app bot.py .
+# Копируем код приложения
+COPY --chown=app:app . .
 
 # Переключаемся на пользователя app
 USER app
