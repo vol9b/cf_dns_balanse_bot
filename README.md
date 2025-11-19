@@ -1,128 +1,97 @@
-# 🤖 Cloudflare DNS Load Balancer Bot
+# Cloudflare DNS Load Balancer
 
-Автоматическая балансировка DNS-записей на основе доступности серверов. Бот пингует серверы и обновляет A/AAAA-записи в Cloudflare, оставляя только доступные.
+Высокопроизводительный DNS балансировщик нагрузки для доменов Cloudflare. Написан на Python с использованием **AsyncIO**, мониторит доступность серверов через ICMP ping и автоматически обновляет DNS записи для обеспечения высокой доступности.
 
-## 🚀 Быстрый старт
+## Ключевые особенности
 
-### Автоматическая установка (рекомендуется)
+*   **Асинхронное ядро**: Построен на `asyncio` и `aiohttp` для неблокирующего ввода-вывода, способен мониторить десятки хостов одновременно с минимальным потреблением ресурсов.
+*   **Stateful логика**: Использует SQLite (`aiosqlite`) для отслеживания состояния хостов и предотвращения "flapping" (частого переключения статусов).
+*   **Anti-Flap система**: Настраиваемые пороги для переключения статуса хоста (UP/DOWN).
+*   **Docker**: Готовый к использованию Docker контейнер с поддержкой `docker-compose`.
+*   **Уведомления**: Оповещения в Telegram при изменении статуса.
+
+## Установка
+
+### Docker Compose (Рекомендуется)
+
+1.  Клонируйте репозиторий:
+    ```bash
+    git clone https://github.com/vol9b/cf_dns_balanse_bot.git
+    cd cf_dns_balanse_bot
+    ```
+
+2.  Настройте окружение:
+    ```bash
+    cp env.example .env
+    nano .env
+    ```
+
+3.  Запустите сервис:
+    ```bash
+    docker-compose up -d
+    ```
+
+### Автоматический скрипт (Ubuntu/Debian)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/vol9b/cf_dns_balanse_bot/main/install.sh | sudo bash
 ```
 
-После установки:
-```bash
-cd /opt/cf-dns-bot
-sudo nano .env  # Настройте конфигурацию
-./manage.sh start
-```
+## Конфигурация
 
-### Ручная установка
+Вся настройка выполняется через файл `.env`.
 
-```bash
-git clone https://github.com/vol9b/cf_dns_balanse_bot.git
-cd cf_dns_balanse_bot
-cp env.example .env
-nano .env  # Настройте конфигурацию
-docker compose up -d
-```
-
-## ⚙️ Конфигурация
-
-Обязательные переменные в `.env`:
-
-```env
-# Cloudflare
-CLOUDFLARE_API_TOKEN=your_token
-CF_ZONE_HOSTNAME=zone_id_1:app.example.com,zone_id_2:api.example.com
-```
-
-### 📋 Формат CF_ZONE_HOSTNAME
-
-Поддерживает любое количество доменов в каждой зоне:
-
-```env
-# Пример: 3 домена в зоне 1, 2 домена в зоне 2
-CF_ZONE_HOSTNAME=zone_id_1:domain1.com,zone_id_1:domain2.com,zone_id_1:domain3.com,zone_id_2:domain4.com,zone_id_2:domain5.com
-```
-
-**Правила:**
-- Формат: `zone_id:domain.com`
-- Разделители: запятые `,` между парами
-- Пробелы: можно добавлять для читабельности
-- Порядок: не важен, бот сам сгруппирует по зонам
-
-### Опциональные настройки
+### Основные настройки
 
 | Переменная | Описание | По умолчанию |
 |------------|----------|--------------|
-| `CF_RECORD_TYPES` | Типы DNS записей (A,AAAA) | `A` |
-| `CF_PROXIED` | Проксирование через Cloudflare | `false` |
-| `PING_INTERVAL_SECONDS` | Интервал пинга (сек) | `10` |
-| `CF_SYNC_INTERVAL_MINUTES` | Интервал синхронизации (мин) | `3` |
-| `FLAP_UP_THRESHOLD` | Порог для подъема сервера | `2` |
-| `FLAP_DOWN_THRESHOLD` | Порог для падения сервера | `3` |
-| `CF_MANAGE_DNS` | Управление DNS записями | `true` |
-| `CF_DB_PATH` | Путь к базе данных | `./cf_dns.db` |
-| `LOG_LEVEL` | Уровень логирования (DEBUG,INFO,WARNING,ERROR) | `INFO` |
-| `TELEGRAM_ENABLED` | Telegram уведомления | `false` |
-| `TELEGRAM_BOT_TOKEN` | Токен бота | |
-| `TELEGRAM_CHAT_ID` | ID чата | |
+| `CLOUDFLARE_API_TOKEN` | **Обязательно**. Cloudflare API Token с правами `Zone:DNS:Edit`. | - |
+| `CF_ZONE_HOSTNAME` | **Обязательно**. Список мониторимых зон и хостов. | - |
+| `CF_RECORD_TYPES` | Типы DNS записей для управления (через запятую). | `A` |
+| `CF_PROXIED` | Включить ли Cloudflare Proxy (оранжевое облако). | `false` |
 
-## 🔧 Управление
+### Мониторинг и Логика
+
+| Переменная | Описание | По умолчанию |
+|------------|----------|--------------|
+| `PING_INTERVAL_SECONDS` | Интервал между проверками ping. | `10` |
+| `CF_SYNC_INTERVAL_MINUTES` | Полная синхронизация с Cloudflare API. | `3` |
+| `FLAP_UP_THRESHOLD` | Количество успешных пингов подряд для статуса UP. | `2` |
+| `FLAP_DOWN_THRESHOLD` | Количество неудачных пингов подряд для статуса DOWN. | `3` |
+
+### Формат настройки хостов
+
+Переменная `CF_ZONE_HOSTNAME` определяет, какие домены мониторить. Поддерживает несколько зон и несколько доменов в каждой зоне.
+
+**Формат:** `zone_id:domain,zone_id:domain`
+
+**Пример:**
+```env
+# Мониторинг 'app.example.com' в Зоне A и 'api.test.com' в Зоне B
+CF_ZONE_HOSTNAME=zone_id_A:app.example.com,zone_id_B:api.test.com
+```
+
+## Архитектура
+
+Бот работает в непрерывном цикле:
+
+1.  **Sync**: Периодически запрашивает текущие DNS записи из Cloudflare для синхронизации локальной БД.
+2.  **Check**: Пингует все известные IP адреса для настроенных доменов параллельно.
+3.  **Evaluate**: Обновляет локальное состояние (SQLite). Применяет anti-flap логику.
+4.  **Reconcile**: Если стабильное состояние изменилось (например, хост упал):
+    *   Отправляет уведомление в Telegram.
+    *   Обновляет DNS записи в Cloudflare (удаляет недоступные, добавляет доступные).
+
+## Управление
+
+В комплекте идет скрипт `manage.sh` для частых задач:
 
 ```bash
-cd /opt/cf-dns-bot
-
-./manage.sh start    # Запустить
-./manage.sh stop     # Остановить
-./manage.sh restart  # Перезапустить
-./manage.sh status   # Статус
-./manage.sh logs     # Логи
-./manage.sh update   # Обновить
-./manage.sh config   # Редактировать .env
+./manage.sh logs    # Просмотр логов
+./manage.sh restart # Перезапуск контейнера
+./manage.sh update  # Обновление кода и пересборка
 ```
 
-## 🔑 Получение токенов
-
-### API Token Cloudflare
-1. [Cloudflare Dashboard](https://dash.cloudflare.com/profile/api-tokens) → Create Token
-2. Custom token → Permissions: `Zone:Zone:Read`, `Zone:DNS:Edit`
-3. Zone Resources: `Include:All zones`
-
-### Zone ID и домены
-1. [Cloudflare Dashboard](https://dash.cloudflare.com) → Выберите домен
-2. Правая панель → Zone ID
-3. Для каждого домена повторите шаги 1-2
-4. Используйте формат: `CF_ZONE_HOSTNAME=zone_id:domain.com,zone_id:another.com`
-
-**Пример для множественных доменов:**
-```env
-# 3 домена в зоне 1, 2 домена в зоне 2
-CF_ZONE_HOSTNAME=zone_id_1:domain1.com,zone_id_1:domain2.com,zone_id_1:domain3.com,zone_id_2:domain4.com,zone_id_2:domain5.com
-```
-
-### Telegram Bot (опционально)
-1. [@BotFather](https://t.me/botfather) → `/newbot`
-2. Скопируйте токен
-3. Для Chat ID: напишите боту и перейдите по ссылке:
-   `https://api.telegram.org/bot<TOKEN>/getUpdates`
-
-## 📊 Как это работает
-
-- Бот пингует серверы каждые 10 секунд
-- При падении сервера (3 неудачных пинга) удаляет его из DNS
-- При подъеме сервера (2 успешных пинга) добавляет обратно
-- Синхронизируется с Cloudflare каждые 3 минуты
-- Отправляет уведомления в Telegram при изменениях
-
-## ⚡ Оптимизация
-
-По умолчанию настроено для критически важных сервисов:
-- Быстрое восстановление (20 сек)
-- Умеренное обнаружение падения (30 сек)
-- Минимальный простой при TTL=1 минута
-
-## 📄 Лицензия
+## Лицензия
 
 MIT License
