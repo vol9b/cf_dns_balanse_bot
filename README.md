@@ -1,97 +1,97 @@
 # Cloudflare DNS Load Balancer
 
-High-performance DNS load balancer for Cloudflare managed domains. Written in Python using **AsyncIO**, it monitors server availability via ICMP ping and automatically updates DNS records to ensure high availability.
+Высокопроизводительный DNS балансировщик нагрузки для доменов Cloudflare. Написан на Python с использованием **AsyncIO**, мониторит доступность серверов через ICMP ping и автоматически обновляет DNS записи для обеспечения высокой доступности.
 
-## Key Features
+## Ключевые особенности
 
-*   **Asynchronous Core**: Built with `asyncio` and `aiohttp` for non-blocking I/O, capable of monitoring dozens of hosts simultaneously with minimal resource usage.
-*   **Stateful Logic**: Uses SQLite (`aiosqlite`) to track host state and prevent "flapping" (rapidly switching between up/down states).
-*   **Anti-Flap System**: Configurable thresholds for marking a host as UP or DOWN.
-*   **Dockerized**: Ready-to-use Docker container with `docker-compose` support.
-*   **Notifications**: Telegram alerts on status changes.
+*   **Асинхронное ядро**: Построен на `asyncio` и `aiohttp` для неблокирующего ввода-вывода, способен мониторить десятки хостов одновременно с минимальным потреблением ресурсов.
+*   **Stateful логика**: Использует SQLite (`aiosqlite`) для отслеживания состояния хостов и предотвращения "flapping" (частого переключения статусов).
+*   **Anti-Flap система**: Настраиваемые пороги для переключения статуса хоста (UP/DOWN).
+*   **Docker**: Готовый к использованию Docker контейнер с поддержкой `docker-compose`.
+*   **Уведомления**: Оповещения в Telegram при изменении статуса.
 
-## Installation
+## Установка
 
-### Docker Compose (Recommended)
+### Docker Compose (Рекомендуется)
 
-1.  Clone the repository:
+1.  Клонируйте репозиторий:
     ```bash
     git clone https://github.com/vol9b/cf_dns_balanse_bot.git
     cd cf_dns_balanse_bot
     ```
 
-2.  Configure environment:
+2.  Настройте окружение:
     ```bash
     cp env.example .env
     nano .env
     ```
 
-3.  Start the service:
+3.  Запустите сервис:
     ```bash
     docker-compose up -d
     ```
 
-### Automated Script (Ubuntu/Debian)
+### Автоматический скрипт (Ubuntu/Debian)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/vol9b/cf_dns_balanse_bot/main/install.sh | sudo bash
 ```
 
-## Configuration
+## Конфигурация
 
-Configuration is handled entirely via the `.env` file.
+Вся настройка выполняется через файл `.env`.
 
-### Core Settings
+### Основные настройки
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `CLOUDFLARE_API_TOKEN` | **Required**. Cloudflare API Token with `Zone:DNS:Edit` permissions. | - |
-| `CF_ZONE_HOSTNAME` | **Required**. List of monitored zones and hosts. | - |
-| `CF_RECORD_TYPES` | DNS record types to manage (comma-separated). | `A` |
-| `CF_PROXIED` | Whether to enable Cloudflare Proxy (orange cloud). | `false` |
+| Переменная | Описание | По умолчанию |
+|------------|----------|--------------|
+| `CLOUDFLARE_API_TOKEN` | **Обязательно**. Cloudflare API Token с правами `Zone:DNS:Edit`. | - |
+| `CF_ZONE_HOSTNAME` | **Обязательно**. Список мониторимых зон и хостов. | - |
+| `CF_RECORD_TYPES` | Типы DNS записей для управления (через запятую). | `A` |
+| `CF_PROXIED` | Включить ли Cloudflare Proxy (оранжевое облако). | `false` |
 
-### Monitoring & Logic
+### Мониторинг и Логика
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `PING_INTERVAL_SECONDS` | Interval between ping checks. | `10` |
-| `CF_SYNC_INTERVAL_MINUTES` | Full sync with Cloudflare API. | `3` |
-| `FLAP_UP_THRESHOLD` | Consecutive successful pings to mark host UP. | `2` |
-| `FLAP_DOWN_THRESHOLD` | Consecutive failed pings to mark host DOWN. | `3` |
+| Переменная | Описание | По умолчанию |
+|------------|----------|--------------|
+| `PING_INTERVAL_SECONDS` | Интервал между проверками ping. | `10` |
+| `CF_SYNC_INTERVAL_MINUTES` | Полная синхронизация с Cloudflare API. | `3` |
+| `FLAP_UP_THRESHOLD` | Количество успешных пингов подряд для статуса UP. | `2` |
+| `FLAP_DOWN_THRESHOLD` | Количество неудачных пингов подряд для статуса DOWN. | `3` |
 
-### Host Configuration Format
+### Формат настройки хостов
 
-The `CF_ZONE_HOSTNAME` variable defines which domains to monitor. It supports multiple zones and multiple domains per zone.
+Переменная `CF_ZONE_HOSTNAME` определяет, какие домены мониторить. Поддерживает несколько зон и несколько доменов в каждой зоне.
 
-**Format:** `zone_id:domain,zone_id:domain`
+**Формат:** `zone_id:domain,zone_id:domain`
 
-**Example:**
+**Пример:**
 ```env
-# Monitor 'app.example.com' in Zone A and 'api.test.com' in Zone B
+# Мониторинг 'app.example.com' в Зоне A и 'api.test.com' в Зоне B
 CF_ZONE_HOSTNAME=zone_id_A:app.example.com,zone_id_B:api.test.com
 ```
 
-## Architecture
+## Архитектура
 
-The bot operates in a continuous loop:
+Бот работает в непрерывном цикле:
 
-1.  **Sync**: Periodically fetches current DNS records from Cloudflare to ensure the local DB is in sync.
-2.  **Check**: Pings all known IPs for the configured domains in parallel.
-3.  **Evaluate**: Updates the local state (SQLite). Applies anti-flap logic.
-4.  **Reconcile**: If the stable state changes (e.g., host goes DOWN):
-    *   Sends a Telegram notification.
-    *   Updates Cloudflare DNS records (removes DOWN hosts, adds UP hosts).
+1.  **Sync**: Периодически запрашивает текущие DNS записи из Cloudflare для синхронизации локальной БД.
+2.  **Check**: Пингует все известные IP адреса для настроенных доменов параллельно.
+3.  **Evaluate**: Обновляет локальное состояние (SQLite). Применяет anti-flap логику.
+4.  **Reconcile**: Если стабильное состояние изменилось (например, хост упал):
+    *   Отправляет уведомление в Telegram.
+    *   Обновляет DNS записи в Cloudflare (удаляет недоступные, добавляет доступные).
 
-## Management
+## Управление
 
-A helper script `manage.sh` is included for common tasks:
+В комплекте идет скрипт `manage.sh` для частых задач:
 
 ```bash
-./manage.sh logs    # View logs
-./manage.sh restart # Restart container
-./manage.sh update  # Pull latest changes and rebuild
+./manage.sh logs    # Просмотр логов
+./manage.sh restart # Перезапуск контейнера
+./manage.sh update  # Обновление кода и пересборка
 ```
 
-## License
+## Лицензия
 
 MIT License
