@@ -1,0 +1,17 @@
+.env
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+cf_dns.db
+cf_dns.db-shm
+cf_dns.db-wal
+env.example
+install.sh
+manage.sh
+README.md
+docker-compose.yml
