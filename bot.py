@@ -305,9 +305,12 @@ async def main_async() -> None:
     # Bug #10 fix: set global timeout for the session
     timeout = aiohttp.ClientTimeout(total=30, connect=10)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        # Инициализация domain_settings из конфига
-        for zone_id, hostname in cfg.zone_hostname_pairs:
-            await db_add_domain(conn, zone_id, hostname)
+        # Инициализация domain_settings из конфига (пропускаем удалённые)
+        for zone_id, hostname in cfg.zone_hostname_pairs[:]:  # копия списка
+            added = await db_add_domain(conn, zone_id, hostname)
+            if not added:
+                cfg.zone_hostname_pairs.remove((zone_id, hostname))
+                logging.info(f"🚫 Домен {hostname} был удалён, пропускаем")
 
         # Загрузка доменов из БД (добавленных через UI)
         db_domains = await db_get_domain_settings(conn)
