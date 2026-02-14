@@ -110,10 +110,17 @@ async def db_init(conn: aiosqlite.Connection) -> None:
                 hostname TEXT NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 added_at INTEGER NOT NULL,
+                deleted INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (zone_id, hostname)
             );
             """
         )
+
+        # Миграция: добавляем колонку deleted если её нет
+        async with conn.execute("PRAGMA table_info(domain_settings)") as cursor:
+            ds_cols = [r[1] for r in await cursor.fetchall()]
+        if "deleted" not in ds_cols:
+            await conn.execute("ALTER TABLE domain_settings ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
 
         await conn.commit()
         logging.info("Схема базы данных инициализирована успешно")
@@ -302,14 +309,27 @@ async def db_get_records_by_name_types(conn: aiosqlite.Connection, name: str, ty
 async def db_get_domain_settings(
     conn: aiosqlite.Connection,
 ) -> List[dict]:
-    """Return all domain settings as list of dicts."""
+    """Return all active (non-deleted) domain settings as list of dicts."""
     async with conn.execute(
         "SELECT zone_id, hostname, enabled, added_at "
-        "FROM domain_settings ORDER BY hostname"
+        "FROM domain_settings WHERE deleted=0 ORDER BY hostname"
     ) as cursor:
         rows = await cursor.fetchall()
     return [{"zone_id": r[0], "hostname": r[1],
              "enabled": bool(r[2]), "added_at": r[3]} for r in rows]
+
+
+async def db_is_domain_deleted(
+    conn: aiosqlite.Connection,
+    zone_id: str, hostname: str,
+) -> bool:
+    """Check if domain was soft-deleted."""
+    async with conn.execute(
+        "SELECT deleted FROM domain_settings WHERE zone_id=? AND hostname=?",
+        (zone_id, hostname),
+    ) as cursor:
+        row = await cursor.fetchone()
+    return bool(row and row[0])
 
 
 async def db_set_domain_enabled(
@@ -330,24 +350,35 @@ async def db_set_domain_enabled(
 async def db_add_domain(
     conn: aiosqlite.Connection,
     zone_id: str, hostname: str,
-) -> None:
-    """Add a new domain to settings (enabled by default)."""
+    force: bool = False,
+) -> bool:
+    """Add a new domain to settings (enabled by default).
+
+    Returns True if domain was added, False if it was previously deleted.
+    Use force=True to re-add a deleted domain (from UI).
+    """
+    # Check if domain was soft-deleted
+    if not force and await db_is_domain_deleted(conn, zone_id, hostname):
+        return False
+
     now = int(time.time())
     await conn.execute(
-        "INSERT OR IGNORE INTO domain_settings"
-        "(zone_id, hostname, enabled, added_at) VALUES(?,?,1,?)",
-        (zone_id, hostname, now),
+        "INSERT INTO domain_settings(zone_id, hostname, enabled, added_at, deleted) "
+        "VALUES(?,?,1,?,0) "
+        "ON CONFLICT(zone_id, hostname) DO UPDATE SET deleted=0, enabled=1, added_at=?",
+        (zone_id, hostname, now, now),
     )
     await conn.commit()
+    return True
 
 
 async def db_remove_domain(
     conn: aiosqlite.Connection,
     zone_id: str, hostname: str,
 ) -> None:
-    """Remove a domain from settings."""
+    """Soft-delete a domain from settings."""
     await conn.execute(
-        "DELETE FROM domain_settings WHERE zone_id=? AND hostname=?",
+        "UPDATE domain_settings SET deleted=1 WHERE zone_id=? AND hostname=?",
         (zone_id, hostname),
     )
     await conn.commit()

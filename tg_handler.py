@@ -707,8 +707,8 @@ async def _handle_text_message(
             )
             return
 
-        # Success
-        await db_add_domain(conn, zone_id, hostname)
+        # Success (force=True to override soft-delete)
+        await db_add_domain(conn, zone_id, hostname, force=True)
         if (zone_id, hostname) not in cfg.zone_hostname_pairs:
             cfg.zone_hostname_pairs.append((zone_id, hostname))
 
