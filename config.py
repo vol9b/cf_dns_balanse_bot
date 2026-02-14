@@ -1,9 +1,9 @@
 import os
 import re
-import logging
 from dataclasses import dataclass
-from typing import List, Set, Tuple, Optional
+from typing import List, Set, Tuple, Optional, Dict
 from dotenv import load_dotenv
+
 
 @dataclass
 class Config:
@@ -12,7 +12,6 @@ class Config:
     proxied_default: bool
     ping_interval_seconds: int
     sync_interval_minutes: int
-    flap_threshold: int
     flap_up_threshold: int
     flap_down_threshold: int
     manage_dns: bool
@@ -20,7 +19,9 @@ class Config:
     tg_token: Optional[str]
     tg_chat_id: Optional[str]
     tg_enabled: bool
+    tg_custom_emoji_ids: Dict[str, str]
     log_level: str = "INFO"
+
 
 def load_config_from_env() -> Config:
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -30,13 +31,13 @@ def load_config_from_env() -> Config:
     zone_hostname_raw = os.getenv("CF_ZONE_HOSTNAME") or ""
     if not zone_hostname_raw:
         raise ValueError("CF_ZONE_HOSTNAME обязателен. Формат: zone_id:hostname,zone_id:hostname")
-    
+
     zone_hostname_pairs = []
     for pair in re.split(r"[\s,;]+", zone_hostname_raw):
         if ":" in pair:
             zone_id, hostname = pair.split(":", 1)
             zone_hostname_pairs.append((zone_id.strip(), hostname.strip()))
-    
+
     if not zone_hostname_pairs:
         raise ValueError("CF_ZONE_HOSTNAME должен содержать хотя бы одну пару zone_id:hostname")
 
@@ -50,7 +51,6 @@ def load_config_from_env() -> Config:
 
     ping_interval_seconds = int(os.getenv("PING_INTERVAL_SECONDS", "10"))
     sync_interval_minutes = int(os.getenv("CF_SYNC_INTERVAL_MINUTES", "3"))
-    flap_threshold = int(os.getenv("FLAP_THRESHOLD", "3"))
     flap_up_threshold = int(os.getenv("FLAP_UP_THRESHOLD", "2"))
     flap_down_threshold = int(os.getenv("FLAP_DOWN_THRESHOLD", "3"))
     manage_dns = (os.getenv("CF_MANAGE_DNS", "true").strip().lower() in {"1", "true", "yes", "on"})
@@ -60,7 +60,16 @@ def load_config_from_env() -> Config:
     tg_token = os.getenv("TELEGRAM_BOT_TOKEN")
     tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
     tg_enabled = (os.getenv("TELEGRAM_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}) and bool(tg_token and tg_chat_id)
-    
+
+    # Format: key=id,key2=id2
+    tg_custom_emoji_raw = os.getenv("TELEGRAM_PREMIUM_EMOJI_IDS", "")
+    tg_custom_emoji_ids = {}
+    if tg_custom_emoji_raw:
+        for pair in tg_custom_emoji_raw.split(","):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                tg_custom_emoji_ids[k.strip()] = v.strip()
+
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
     return Config(
@@ -69,7 +78,7 @@ def load_config_from_env() -> Config:
         proxied_default=proxied_default,
         ping_interval_seconds=ping_interval_seconds,
         sync_interval_minutes=sync_interval_minutes,
-        flap_threshold=flap_threshold,
+
         flap_up_threshold=flap_up_threshold,
         flap_down_threshold=flap_down_threshold,
         manage_dns=manage_dns,
@@ -77,5 +86,6 @@ def load_config_from_env() -> Config:
         tg_token=tg_token,
         tg_chat_id=tg_chat_id,
         tg_enabled=tg_enabled,
+        tg_custom_emoji_ids=tg_custom_emoji_ids,
         log_level=log_level,
     )

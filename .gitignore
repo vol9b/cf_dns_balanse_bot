@@ -209,8 +209,27 @@ __marimo__/
 
 # Database files (contain sensitive data)
 *.db
+*.db-shm
+*.db-wal
+*.db-journal
 *.sqlite
 *.sqlite3
 
-# But allow example database
-!cf_dns_example.db
+# Draft/working documents (not for repo)
+IMPLEMENTATION_PLAN.md
+WALKTHROUGH.md
+otchet.md
+*.draft.md
+TODO.md
+NOTES.md
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
