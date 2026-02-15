@@ -13,7 +13,7 @@ DNS балансировщик для Cloudflare с Telegram-ботом. Мон�
 ## Быстрый старт
 
 ```bash
-git clone https://github.com/user/cf_dns_balanse_bot.git
+git clone https://github.com/vol9b/cf_dns_balanse_bot.git
 cd cf_dns_balanse_bot
 cp env.example .env
 # отредактировать .env
