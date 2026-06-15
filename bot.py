@@ -380,10 +380,25 @@ async def main_async() -> None:
         sync_interval_cycles = (cfg.sync_interval_minutes * 60) // cfg.ping_interval_seconds
         logging.info(f"Синхронизация с CF каждые {cfg.sync_interval_minutes} мин")
 
+        # Heartbeat для docker healthcheck: обновляется каждый цикл проверки.
+        # Если основной цикл завис — файл устареет, контейнер станет unhealthy
+        # и container_watch отдаст алерт. Сбой записи не роняет бота.
+        heartbeat_path = os.path.join(os.path.dirname(cfg.db_path), "heartbeat")
+
+        def _beat() -> None:
+            try:
+                with open(heartbeat_path, "w") as _hb:
+                    _hb.write(str(int(time.time())))
+            except Exception as e:
+                logging.warning(f"heartbeat write failed: {e}")
+
+        _beat()  # первый удар до входа в цикл (для start_period)
+
         while not shutdown_event.is_set():
             try:
                 start_time = time.time()
                 await one_cycle(on_status_change)
+                _beat()
                 cycle_count += 1
 
                 if cycle_count >= sync_interval_cycles:
